@@ -6,7 +6,7 @@ ARG DISTRO_VERSION
 
 RUN \
   echo "**** install labwc/wlroots build deps ****" && \
-  pacman -Sy --noconfirm \
+  pacman -Syu --noconfirm \
     base-devel \
     cairo \
     git \
