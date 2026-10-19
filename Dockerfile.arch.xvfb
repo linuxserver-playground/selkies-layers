@@ -6,7 +6,7 @@ ARG XLIBRE_TAG=xlibre-xserver-25.2.2
 
 RUN \
   echo "**** install xlibre build deps ****" && \
-  pacman -Sy --noconfirm --needed \
+  pacman -Syu --noconfirm --needed \
     base-devel \
     git \
     libbsd \

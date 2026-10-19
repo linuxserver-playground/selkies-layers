@@ -4,7 +4,7 @@ FROM ghcr.io/linuxserver/baseimage-arch:latest AS wtype-builder
 
 RUN \
   echo "**** install wtype build deps ****" && \
-  pacman -Sy --noconfirm --needed \
+  pacman -Syu --noconfirm --needed \
     base-devel \
     cmake \
     git \

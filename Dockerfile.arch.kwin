@@ -8,7 +8,7 @@ COPY patches/arch/${DISTRO_VERSION}/kwin/ /build/patches/
 
 RUN \
   echo "**** install build deps ****" && \
-  pacman -Sy --noconfirm --needed \
+  pacman -Syu --noconfirm --needed \
     base-devel \
     cmake \
     extra-cmake-modules \

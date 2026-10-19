@@ -4,7 +4,7 @@ FROM ghcr.io/linuxserver/baseimage-arch:latest AS selkies-desktop-builder
 
 RUN \
   echo "**** install selkies-desktop build deps ****" && \
-  pacman -Sy --noconfirm --needed \
+  pacman -Syu --noconfirm --needed \
     base-devel \
     cairo \
     git \
