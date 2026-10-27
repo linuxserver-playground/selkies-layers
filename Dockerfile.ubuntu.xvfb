@@ -2,6 +2,9 @@
 
 FROM ghcr.io/linuxserver-playground/baseimage-ubuntu:resolute AS xvfb-builder
 
+# Retry failed apt downloads: Kali's CDN mirrors drop connections mid-fetch.
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
+
 ARG XLIBRE_TAG=xlibre-xserver-25.2.2
 ARG DEBIAN_FRONTEND=noninteractive
 
