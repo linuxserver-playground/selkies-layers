@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/linuxserver/baseimage-alpine:3.24 AS xvfb-builder
+FROM ghcr.io/linuxserver-playground/baseimage-alpine:3.24 AS xvfb-builder
 
 ARG XLIBRE_TAG=xlibre-xserver-25.2.2
 

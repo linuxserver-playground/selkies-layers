@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/linuxserver/baseimage-ubuntu:resolute AS kwin-builder
+FROM ghcr.io/linuxserver-playground/baseimage-ubuntu:resolute AS kwin-builder
 
 ARG DISTRO_VERSION
 ARG DEBIAN_FRONTEND=noninteractive

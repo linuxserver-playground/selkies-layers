@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/linuxserver/baseimage-alpine:3.24 AS kwin-builder
+FROM ghcr.io/linuxserver-playground/baseimage-alpine:3.24 AS kwin-builder
 
 ARG DISTRO_VERSION
 ARG APORTS_BRANCH=3.24-stable

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/linuxserver/baseimage-fedora:44 AS labwc-builder
+FROM ghcr.io/linuxserver-playground/baseimage-fedora:44 AS labwc-builder
 
 ARG DISTRO_VERSION
 

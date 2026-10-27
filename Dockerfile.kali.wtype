@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/linuxserver/baseimage-debian:kali AS wtype-builder
+FROM ghcr.io/linuxserver-playground/baseimage-debian:kali AS wtype-builder
 
 RUN \
   echo "**** install wtype build deps ****" && \
