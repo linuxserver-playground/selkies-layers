@@ -40,9 +40,11 @@ Dispatch inputs:
 | `layer` | all | Comma separated layers, e.g. `kwin`. |
 | `arch` | both | `amd64`, `arm64` or both. The manifest always names both arch tags, so a one-arch run keeps the other arch's last build. |
 | `push` | `true` | Push the images and manifests. |
-| `parallel` | `4` | Build jobs at once, clamped to 1-10. Control will dispatch with a value worked out from the free runner slots. |
+| `parallel` | `4` | Build jobs at once, clamped to 1-16. Control dispatches with 20 - 4 reserved - busy slots, capped at 16. |
 
-Push, schedule and pull request runs take `parallel` 4. One publishing run at a time: push, schedule and
+Push, schedule and pull request runs take `parallel` 4. Control takes over the nightly build: when the
+repository variable `SCHEDULED_BY_CONTROL` is `true`, a `schedule` event skips every job and control dispatches
+the run itself with its computed `parallel`. Unset (or in a fork), the cron builds as before. One publishing run at a time: push, schedule and
 dispatch share one concurrency group, so a second run waits (GitHub keeps only the newest pending one).
 
 ```bash
@@ -61,7 +63,7 @@ Everything, by pull request or on `main`. The source is `linuxserver/selkies-lay
 only): keep the Dockerfiles and patches close to it so its changes merge, and keep the playground's own changes
 (the `FROM` and image namespace, the retries, the workflow) as separate commits. Every `ghcr.io/linuxserver/`
 name rewritten to the playground is listed in the workspace's `docs/playground-references.md`. Never raise the
-`parallel` clamp or remove `max-parallel` without the maintainers.
+`parallel` clamp (16) or remove `max-parallel` without the maintainers.
 
 ## How to validate
 
