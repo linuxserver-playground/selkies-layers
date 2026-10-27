@@ -34,7 +34,7 @@ on:
         default: true
 
 env:
-  LAYERS_IMAGE: ghcr.io/linuxserver/selkies-layers
+  LAYERS_IMAGE: ghcr.io/linuxserver-playground/selkies-layers
   RUNNER_AMD64: ubuntu-24.04
   RUNNER_ARM64: ubuntu-24.04-arm
 

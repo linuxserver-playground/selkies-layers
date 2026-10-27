@@ -22,7 +22,7 @@ import re
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMAGE = os.environ.get("LAYERS_IMAGE", "ghcr.io/linuxserver/selkies-layers")
+IMAGE = os.environ.get("LAYERS_IMAGE", "ghcr.io/linuxserver-playground/selkies-layers")
 
 ARCHES = {
     "amd64": {

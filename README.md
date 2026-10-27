@@ -2,7 +2,7 @@
 
 Prebuilt, patched components for the LinuxServer.io Selkies images.
 
-Images live at `ghcr.io/linuxserver/selkies-layers`.
+Images live at `ghcr.io/linuxserver-playground/selkies-layers`.
 
 ## Layers
 
@@ -18,12 +18,12 @@ a single copy:
 
 ```dockerfile
 # Dockerfile (amd64)
-COPY --from=ghcr.io/linuxserver/selkies-layers:debiantrixie-labwc / /
-COPY --from=ghcr.io/linuxserver/selkies-layers:debiantrixie-wtype / /
+COPY --from=ghcr.io/linuxserver-playground/selkies-layers:debiantrixie-labwc / /
+COPY --from=ghcr.io/linuxserver-playground/selkies-layers:debiantrixie-wtype / /
 
 # Dockerfile.aarch64
-COPY --from=ghcr.io/linuxserver/selkies-layers:arm64v8-debiantrixie-labwc / /
-COPY --from=ghcr.io/linuxserver/selkies-layers:arm64v8-debiantrixie-wtype / /
+COPY --from=ghcr.io/linuxserver-playground/selkies-layers:arm64v8-debiantrixie-labwc / /
+COPY --from=ghcr.io/linuxserver-playground/selkies-layers:arm64v8-debiantrixie-wtype / /
 ```
 
 ## Tags
@@ -31,9 +31,9 @@ COPY --from=ghcr.io/linuxserver/selkies-layers:arm64v8-debiantrixie-wtype / /
 Per layer three tags are pushed:
 
 ```
-ghcr.io/linuxserver/selkies-layers:amd64-alpine324-labwc
-ghcr.io/linuxserver/selkies-layers:arm64v8-alpine324-labwc
-ghcr.io/linuxserver/selkies-layers:alpine324-labwc        # multi-arch manifest
+ghcr.io/linuxserver-playground/selkies-layers:amd64-alpine324-labwc
+ghcr.io/linuxserver-playground/selkies-layers:arm64v8-alpine324-labwc
+ghcr.io/linuxserver-playground/selkies-layers:alpine324-labwc        # multi-arch manifest
 ```
 
 Current bases:
