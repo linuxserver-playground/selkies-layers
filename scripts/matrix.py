@@ -143,6 +143,9 @@ def main():
                 }
             )
         if arch_tags:
+            # The manifest always names every arch, built in this run or not: a run filtered to one arch
+            # must not turn the multi-arch tag into a single-arch one.
+            all_tags = [f"{info['tag_prefix']}{base}-{layer}" for info in ARCHES.values()]
             manifests.append(
                 {
                     "name": f"{base}-{layer}",
@@ -151,8 +154,8 @@ def main():
                     "layer": layer,
                     "tag": f"{base}-{layer}",
                     "image": f"{IMAGE}:{base}-{layer}",
-                    "sources": " ".join(f"{IMAGE}:{t}" for t in arch_tags.values()),
-                    "arches": " ".join(sorted(arch_tags)),
+                    "sources": " ".join(f"{IMAGE}:{t}" for t in all_tags),
+                    "arches": " ".join(sorted(ARCHES)),
                 }
             )
 

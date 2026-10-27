@@ -32,14 +32,21 @@ on:
         type: boolean
         required: false
         default: true
+      parallel:
+        description: 'Build jobs to run at once (1-10); the org shares 20 runner slots'
+        type: number
+        required: false
+        default: 4
 
 env:
   LAYERS_IMAGE: ghcr.io/linuxserver-playground/selkies-layers
   RUNNER_AMD64: ubuntu-24.04
   RUNNER_ARM64: ubuntu-24.04-arm
 
+# One publishing run at a time, whatever started it (push, schedule or dispatch), so two runs never add up
+# their build jobs; a newer one waits. Pull requests have a group each and cancel their older run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -53,8 +60,9 @@ jobs:
       builds: ${{ steps.matrix.outputs.builds }}
       manifests: ${{ steps.matrix.outputs.manifests }}
       push: ${{ steps.push.outputs.push }}
+      parallel: ${{ steps.parallel.outputs.parallel }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Decide whether to push
         id: push
@@ -66,6 +74,19 @@ jobs:
           else
             echo "push=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Decide how many build jobs run at once
+        id: parallel
+        env:
+          PARALLEL: ${{ inputs.parallel }}
+        run: |
+          # Push, schedule and pull request runs have no inputs and take the default. Clamped to 1-10 so a
+          # run always leaves the image builds at least half of the org's 20 runner slots.
+          p="${PARALLEL:-4}"
+          [[ "${p}" =~ ^[0-9]+$ ]] || { echo "::error::parallel must be a whole number, got '${p}'"; exit 1; }
+          (( p < 1 )) && p=1
+          (( p > 10 )) && p=10
+          echo "parallel=${p}" >> "$GITHUB_OUTPUT"
 
       - name: Generate matrix
         id: matrix
@@ -79,11 +100,12 @@ jobs:
         env:
           BUILDS: ${{ steps.matrix.outputs.builds }}
           PUSH: ${{ steps.push.outputs.push }}
+          PARALLEL: ${{ steps.parallel.outputs.parallel }}
         run: |
           python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, os
           print("## Build matrix\n")
-          print(f"Push: `{os.environ['PUSH']}`\n")
+          print(f"Push: `{os.environ['PUSH']}`, {os.environ['PARALLEL']} build jobs at a time\n")
           print("| Job | Dockerfile | Platform | Runner | Tag |")
           print("| --- | --- | --- | --- | --- |")
           for b in json.loads(os.environ["BUILDS"]):
@@ -94,16 +116,18 @@ jobs:
     name: ${{ matrix.name }}
     needs: matrix
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 360
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
+      # The org's 20 concurrent job slots are shared with every image build: a full run is ~46 build jobs.
+      max-parallel: ${{ fromJSON(needs.matrix.outputs.parallel) }}
       matrix:
         include: ${{ fromJson(needs.matrix.outputs.builds) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Free runner disk space
         run: |
@@ -122,90 +146,46 @@ jobs:
 
       - name: Log in to ghcr.io
         if: needs.matrix.outputs.push == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build ${{ matrix.tag }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: ${{ matrix.platform }}
-          build-args: |
-            DISTRO_VERSION=${{ matrix.version }}
-          tags: ${{ matrix.image }}
-          push: ${{ needs.matrix.outputs.push == 'true' }}
-          load: ${{ needs.matrix.outputs.push != 'true' }}
-          no-cache: true
-          pull: true
-          provenance: false
-          sbom: false
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.title=selkies-layers ${{ matrix.layer }} (${{ matrix.distro }} ${{ matrix.version }})
-            org.opencontainers.image.description=Prebuilt ${{ matrix.layer }} layer for linuxserver ${{ matrix.distro }} ${{ matrix.version }} selkies images
-            io.linuxserver.selkies-layers.distro=${{ matrix.distro }}
-            io.linuxserver.selkies-layers.version=${{ matrix.version }}
-            io.linuxserver.selkies-layers.layer=${{ matrix.layer }}
-            io.linuxserver.selkies-layers.arch=${{ matrix.arch }}
+        env:
+          BUILD_JSON: ${{ toJSON(matrix) }}
+          PUSH: ${{ needs.matrix.outputs.push }}
+        run: scripts/ci-build.sh
 
   manifest:
-    name: manifest ${{ matrix.name }}
+    name: Manifests
     needs:
       - matrix
       - build
     if: ${{ !cancelled() && needs.matrix.outputs.push == 'true' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.matrix.outputs.manifests) }}
     steps:
+      - uses: actions/checkout@v5
+
       - name: Log in to ghcr.io
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      - name: Verify arch images exist
-        run: |
-          set -euo pipefail
-          missing=0
-          for src in ${{ matrix.sources }}; do
-            if docker buildx imagetools inspect "${src}" >/dev/null 2>&1; then
-              echo "ok      ${src}"
-            else
-              echo "::error::missing ${src} (its build job failed or was skipped)"
-              missing=1
-            fi
-          done
-          exit ${missing}
-
-      - name: Create ${{ matrix.tag }}
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create \
-            --tag "${{ matrix.image }}" \
-            ${{ matrix.sources }}
-          docker buildx imagetools inspect "${{ matrix.image }}" | tee /tmp/manifest.txt
-          {
-            echo "### ${{ matrix.tag }}"
-            echo
-            echo '```'
-            cat /tmp/manifest.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Create the multi-arch manifests
+        env:
+          MANIFESTS_JSON: ${{ needs.matrix.outputs.manifests }}
+        run: scripts/ci-manifests.sh
