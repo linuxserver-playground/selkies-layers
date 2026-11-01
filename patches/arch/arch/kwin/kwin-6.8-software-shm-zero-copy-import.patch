@@ -1,0 +1,134 @@
+kwin 6.8: sample clients' wl_shm buffers in place on the memfd software device
+
+Since 6.7 kwin wraps every client wl_shm buffer in a udmabuf and imports that into
+the renderer, so client damage costs no texture upload. Without /dev/udmabuf that
+fails, and on the memfd software device every damaged client region goes through
+glTexSubImage2D into llvmpipe's texture memory first.
+
+llvmpipe imports a dmabuf by mapping the whole fd and reading at the plane offset,
+so the client's own pool memfd serves as that dmabuf just as kwin's render buffers
+do in kwin-6.8-software-shm-presentation.patch. Hand it out as the buffer's
+udmabuf attributes, with no device id, when rendering happens on the memfd device
+and the pool carries F_SEAL_SHRINK (udmabuf demands the same seal, as a pool the
+client shrinks would fault the renderer's threads). Only a software renderer's EGL
+display imports such attributes; a GPU display, and every setup with udmabuf or a
+render node, is unchanged. The dma-buf sync ioctls are skipped on a plain memfd.
+
+Applies to kwin 6.8.x after kwin-6.8-software-shm-presentation.patch.
+
+--- a/src/core/gpumanager.cpp
++++ b/src/core/gpumanager.cpp
+@@ -367,6 +367,37 @@ std::optional<DmaBufAttributes> GpuManager::createUdmabuf(const ShmAttributes *a
+ #endif
+ }
+ 
++std::optional<DmaBufAttributes> GpuManager::createMemfdDmabuf(const ShmAttributes *attributes) const
++{
++    if (m_udmabuf.isValid() || !std::ranges::any_of(m_renderDevices, &RenderDevice::isMemfdDevice)) {
++        return std::nullopt;
++    }
++    // udmabuf refuses pools the client can shrink; the mapping would fault the same way here
++    const int seals = fcntl(attributes->fd.get(), F_GET_SEALS);
++    if (seals == -1 || !(seals & F_SEAL_SHRINK)) {
++        return std::nullopt;
++    }
++    struct stat buf;
++    if (fstat(attributes->fd.get(), &buf) == -1
++        || buf.st_size < attributes->offset + off_t(attributes->size.height()) * attributes->stride) {
++        return std::nullopt;
++    }
++    DmaBufAttributes ret;
++    ret.planeCount = 1;
++    ret.width = attributes->size.width();
++    ret.height = attributes->size.height();
++    ret.format = attributes->format;
++    ret.modifier = DRM_FORMAT_MOD_LINEAR;
++    ret.device = 0;
++    ret.fd[0] = attributes->fd.duplicate();
++    if (!ret.fd[0].isValid()) {
++        return std::nullopt;
++    }
++    ret.offset[0] = attributes->offset;
++    ret.pitch[0] = attributes->stride;
++    return ret;
++}
++
+ const FileDescriptor &GpuManager::udmabuf() const
+ {
+     return m_udmabuf;
+--- a/src/core/gpumanager.h
++++ b/src/core/gpumanager.h
+@@ -58,6 +58,14 @@ public:
+      *      both CPU and GPU side accesses is up to the importer!
+      */
+     std::optional<DmaBufAttributes> createUdmabuf(const ShmAttributes *attributes) const;
++    /**
++     * Hands out the shm buffer's own memfd as a linear dmabuf, for when /dev/udmabuf can't be
++     * opened and rendering happens on the memfd software device. Only that device can import
++     * such a buffer, as its software renderer maps the fd and reads at the offset. It fails
++     * where the client could still shrink the pool under the renderer's threads.
++     * NOTE this doesn't do any copies either, so the same synchronization rules apply.
++     */
++    std::optional<DmaBufAttributes> createMemfdDmabuf(const ShmAttributes *attributes) const;
+     const FileDescriptor &udmabuf() const;
+ 
+     void addDevice(std::unique_ptr<RenderDevice> &&kmsSoftwareDevice);
+--- a/src/opengl/egldisplay.cpp
++++ b/src/opengl/egldisplay.cpp
+@@ -435,7 +435,10 @@ EGLImageKHR EglDisplay::importBufferAsImage(GraphicsBuffer *buffer,
+         image = importDmaBufAsImage(*buffer->dmabufAttributes(), coefficients, range);
+         // On Nvidia, sampling from udmabuf just results in black,
+         // and on i915 there are glitches on some systems
+-    } else if (buffer->udmabufAttributes() && (!m_drmDevice || !s_disableUdmabuf.value_or(m_drmDevice->isNvidia() || m_drmDevice->isI915()))) {
++    } else if (buffer->udmabufAttributes()
++               // a memfd handed out as a dmabuf has no device, and only a software renderer maps it
++               && (buffer->udmabufAttributes()->device != 0 || m_isSoftwareRenderer)
++               && (!m_drmDevice || !s_disableUdmabuf.value_or(m_drmDevice->isNvidia() || m_drmDevice->isI915()))) {
+         image = importDmaBufAsImage(*buffer->udmabufAttributes(), coefficients, range);
+     }
+     m_importCache[key] = image;
+--- a/src/wayland/shmclientbuffer.cpp
++++ b/src/wayland/shmclientbuffer.cpp
+@@ -178,13 +178,22 @@ const struct wl_buffer_interface ShmClientBuffer::implementation = {
+     .destroy = buffer_destroy,
+ };
+ 
++static std::optional<DmaBufAttributes> importableAttributes(const ShmAttributes *attributes)
++{
++    if (auto udmabuf = GpuManager::self()->createUdmabuf(attributes)) {
++        return udmabuf;
++    }
++    // without /dev/udmabuf, the memfd software renderer maps the client's memfd itself
++    return GpuManager::self()->createMemfdDmabuf(attributes);
++}
++
+ ShmClientBuffer::ShmClientBuffer(ShmPool *pool, ShmAttributes attributes, wl_client *client, uint32_t id)
+     : m_shmPool(pool)
+     , m_shmAttributes(std::move(attributes))
+-    , m_udmabufAttributes(GpuManager::self()->createUdmabuf(&m_shmAttributes))
++    , m_udmabufAttributes(importableAttributes(&m_shmAttributes))
+ {
+     m_shmPool->ref();
+-    if (m_udmabufAttributes) {
++    if (m_udmabufAttributes && m_udmabufAttributes->device != 0) {
+ #if defined(Q_OS_LINUX)
+         // This START is for the corresponding END to work
+         // when the buffer is first referenced.
+@@ -213,7 +222,7 @@ ShmClientBuffer::~ShmClientBuffer()
+ void ShmClientBuffer::onReferenced()
+ {
+ #if defined(Q_OS_LINUX)
+-    if (m_udmabufAttributes) {
++    if (m_udmabufAttributes && m_udmabufAttributes->device != 0) {
+         struct dma_buf_sync sync = {
+             .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE,
+         };
+@@ -225,7 +234,7 @@ void ShmClientBuffer::onReferenced()
+ void ShmClientBuffer::onReleased()
+ {
+ #if defined(Q_OS_LINUX)
+-    if (m_udmabufAttributes) {
++    if (m_udmabufAttributes && m_udmabufAttributes->device != 0) {
+         struct dma_buf_sync sync = {
+             .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE,
+         };

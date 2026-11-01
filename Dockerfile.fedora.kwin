@@ -22,12 +22,14 @@ RUN \
     /build/src/kwin-*.src.rpm && \
   echo "**** add patches to the fedora spec ****" && \
   i=100 && \
+  anchor="Source1:" && \
   for kwin_patch in /build/patches/*.patch; do \
     [ -e "${kwin_patch}" ] || continue; \
     echo "adding $(basename "${kwin_patch}") as Patch${i}" && \
     cp "${kwin_patch}" /build/rpmbuild/SOURCES/ && \
-    sed -i "/^Source1:/a Patch${i}: $(basename "${kwin_patch}")" \
+    sed -i "/^${anchor}/a Patch${i}: $(basename "${kwin_patch}")" \
       /build/rpmbuild/SPECS/kwin.spec && \
+    anchor="Patch${i}:" && \
     i=$((i + 1)); \
   done && \
   sed -i \

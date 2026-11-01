@@ -1,0 +1,232 @@
+kwin 6.8: hand a fullscreen client's wl_shm buffer to the host as it is
+
+Direct scanout in kwin needs a DRM scanout device and a dmabuf client buffer,
+so a kwin nested over wl_shm (kwin-6.8-software-shm-presentation.patch) composes
+every frame through llvmpipe, even when one opaque surface covers the screen.
+
+Let an output layer say it accepts shm scanout, which the Wayland backend's layers
+do when they present through wl_shm, and let the compositor and the scene's
+candidate search take a client's wl_shm buffer for such a layer: only one covering
+the whole output, as an overlay would merely move the composing to the host. The
+buffer is attached to the layer's subsurface like kwin's own frames, in the
+formats the host takes, and the client keeps it until the host releases it, as
+with dmabuf scanout. Its pool may hold the buffer at an offset, so the host-side
+pool is sized to include it. When kwin composes again, the first frame repaints
+everything, as kwin's own buffers no longer show what the host last displayed,
+and the layer reports the presented item so clients get their frame feedback.
+
+Applies to kwin 6.8.x after kwin-6.8-software-shm-presentation.patch.
+
+--- a/src/backends/wayland/wayland_backend.cpp
++++ b/src/backends/wayland/wayland_backend.cpp
+@@ -665,7 +665,8 @@ static wl_buffer *importShmBuffer(WaylandDisplay *display, const ShmAttributes *
+         break;
+     }
+ 
+-    wl_shm_pool *pool = wl_shm_create_pool(display->shm(), attributes->fd.get(), attributes->size.height() * attributes->stride);
++    // a client's buffer can sit at an offset into its pool, and the host checks it fits
++    wl_shm_pool *pool = wl_shm_create_pool(display->shm(), attributes->fd.get(), attributes->offset + attributes->size.height() * attributes->stride);
+     wl_buffer *buffer = wl_shm_pool_create_buffer(pool,
+                                                   attributes->offset,
+                                                   attributes->size.width(),
+--- a/src/backends/wayland/wayland_egl_backend.cpp
++++ b/src/backends/wayland/wayland_egl_backend.cpp
+@@ -158,6 +158,7 @@ bool WaylandEglLayer::endFrame(const Region &renderedDeviceRegion, const Region
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+ 
+     m_damageJournal.add(damagedDeviceRegion);
++    m_scanoutPresented = false;
+     return true;
+ }
+ 
+@@ -169,9 +170,23 @@ bool WaylandEglLayer::earlyScanoutChecks()
+ bool WaylandEglLayer::importScanoutBuffer(GraphicsBuffer *buffer, const std::shared_ptr<OutputFrame> &frame)
+ {
+     setBuffer(buffer, Region::infinite());
++    // The host shows the client's picture from now on, so what kwin's own buffers hold
++    // no longer says what is on screen: the next frame kwin composes repaints all of it.
++    m_damageJournal.clear();
++    m_scanoutPresented = true;
+     return true;
+ }
+ 
++SurfaceItem *WaylandEglLayer::presentedDirectScanoutItem() const
++{
++    return m_scanoutPresented ? m_scanoutCandidate.data() : nullptr;
++}
++
++bool WaylandEglLayer::acceptsShmScanout() const
++{
++    return m_backend->backend()->presentsThroughShm();
++}
++
+ FormatModifierMap WaylandEglLayer::supportedDrmFormats() const
+ {
+     return presentableFormats(m_backend->backend());
+@@ -179,6 +194,7 @@ FormatModifierMap WaylandEglLayer::supportedDrmFormats() const
+ 
+ void WaylandEglLayer::releaseBuffers()
+ {
++    m_scanoutPresented = false;
+     m_buffer.reset();
+     m_swapchain.reset();
+ }
+--- a/src/backends/wayland/wayland_egl_backend.h
++++ b/src/backends/wayland/wayland_egl_backend.h
+@@ -45,6 +45,8 @@ public:
+     bool endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
+     bool earlyScanoutChecks() override;
+     bool importScanoutBuffer(GraphicsBuffer *buffer, const std::shared_ptr<OutputFrame> &frame) override;
++    SurfaceItem *presentedDirectScanoutItem() const override;
++    bool acceptsShmScanout() const override;
+     FormatModifierMap supportedDrmFormats() const override;
+     void releaseBuffers() override;
+ 
+@@ -54,6 +56,7 @@ private:
+     std::shared_ptr<EglSwapchainSlot> m_buffer;
+     std::unique_ptr<GLRenderTimeQuery> m_query;
+     WaylandEglBackend *const m_backend;
++    bool m_scanoutPresented = false;
+ 
+     friend class WaylandEglBackend;
+ };
+--- a/src/compositor.cpp
++++ b/src/compositor.cpp
+@@ -45,6 +45,7 @@
+ #include <QQuickWindow>
+ #include <optional>
+ #include <ranges>
++#include <drm_fourcc.h>
+ #include <sys/stat.h>
+ 
+ namespace KWin
+@@ -460,7 +461,7 @@ static Rect mapItemToOutputDeviceCoordinates(Item *item, RenderView *view, Logic
+ 
+ static bool prepareDirectScanout(RenderView *view, LogicalOutput *logicalOutput, BackendOutput *backendOutput, const std::shared_ptr<OutputFrame> &frame)
+ {
+-    if (!view->isVisible() || !view->layer()->scanoutDevice()) {
++    if (!view->isVisible() || (!view->layer()->scanoutDevice() && !view->layer()->acceptsShmScanout())) {
+         return false;
+     }
+     const auto layer = view->layer();
+@@ -474,23 +475,35 @@ static bool prepareDirectScanout(RenderView *view, LogicalOutput *logicalOutput,
+         return false;
+     }
+     const auto attrs = buffer->dmabufAttributes();
+-    if (!attrs) {
+-        return false;
+-    }
+-    const auto compatibleDevice = GpuManager::self()->compatibleRenderDevice(layer->scanoutDevice());
+-    if (attrs->device != layer->scanoutDevice()->deviceId() && attrs->device != compatibleDevice->deviceId()) {
+-        // Disallow direct scanout between GPUs, as
+-        // - there are some significant driver bugs with direct scanout from other GPUs,
+-        //   like https://gitlab.freedesktop.org/drm/amd/-/issues/2075
+-        // - with implicit modifiers, direct scanout on secondary GPUs
+-        //   is also very unlikely to yield the correct results.
+-        // - requesting clients to re-allocate from an incompatible device can trigger
+-        //   driver bugs as well (like rendering freezing on Nvidia, when asked to
+-        //   re-allocate for an integrated GPU)
++    const auto shm = buffer->shmAttributes();
++    uint32_t format = 0;
++    uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
++    if (attrs) {
++        if (!layer->scanoutDevice()) {
++            return false;
++        }
++        const auto compatibleDevice = GpuManager::self()->compatibleRenderDevice(layer->scanoutDevice());
++        if (attrs->device != layer->scanoutDevice()->deviceId() && attrs->device != compatibleDevice->deviceId()) {
++            // Disallow direct scanout between GPUs, as
++            // - there are some significant driver bugs with direct scanout from other GPUs,
++            //   like https://gitlab.freedesktop.org/drm/amd/-/issues/2075
++            // - with implicit modifiers, direct scanout on secondary GPUs
++            //   is also very unlikely to yield the correct results.
++            // - requesting clients to re-allocate from an incompatible device can trigger
++            //   driver bugs as well (like rendering freezing on Nvidia, when asked to
++            //   re-allocate for an integrated GPU)
++            return false;
++        }
++        format = attrs->format;
++        modifier = attrs->modifier;
++    } else if (shm && layer->acceptsShmScanout()) {
++        // the host compositor takes the client's wl_shm buffer as it is
++        format = shm->format;
++    } else {
+         return false;
+     }
+ 
+-    const auto info = FormatInfo::get(attrs->format);
++    const auto info = FormatInfo::get(format);
+     const auto bufferType = info && info->floatingPoint ? ColorPipeline::InputType::FloatingPoint : ColorPipeline::InputType::FixedPoint;
+ 
+     layer->setTargetRect(mapItemToOutputDeviceCoordinates(candidate, view, logicalOutput, backendOutput));
+@@ -504,7 +517,7 @@ static bool prepareDirectScanout(RenderView *view, LogicalOutput *logicalOutput,
+     }
+     const bool tearing = frame->presentationMode() == PresentationMode::Async || frame->presentationMode() == PresentationMode::AdaptiveAsync;
+     const auto formats = tearing ? layer->supportedAsyncDrmFormats() : layer->supportedDrmFormats();
+-    if (!formats.containsFormat(attrs->format, attrs->modifier) || !layer->importScanoutBuffer(candidate->buffer(), frame)) {
++    if (!formats.containsFormat(format, modifier) || !layer->importScanoutBuffer(candidate->buffer(), frame)) {
+         candidate->setScanoutHint(layer->scanoutDevice(), formats);
+         return false;
+     }
+--- a/src/core/outputlayer.cpp
++++ b/src/core/outputlayer.cpp
+@@ -123,6 +123,11 @@ SurfaceItem *OutputLayer::presentedDirectScanoutItem() const
+     return nullptr;
+ }
+ 
++bool OutputLayer::acceptsShmScanout() const
++{
++    return false;
++}
++
+ void OutputLayer::setScanoutCandidate(SurfaceItem *item)
+ {
+     if (m_scanoutCandidate && item != m_scanoutCandidate) {
+--- a/src/core/outputlayer.h
++++ b/src/core/outputlayer.h
+@@ -158,6 +158,13 @@ public:
+ 
+     virtual void releaseBuffers() = 0;
+ 
++    /**
++     * @returns whether this layer presents a client's wl_shm buffer as it is, without a
++     *          scanout device: a nested backend hands it to the host compositor, which
++     *          composes it like it does kwin's own frames
++     */
++    virtual bool acceptsShmScanout() const;
++
+ Q_SIGNALS:
+     void repaintScheduled();
+ 
+--- a/src/scene/workspacescene.cpp
++++ b/src/scene/workspacescene.cpp
+@@ -262,7 +262,14 @@ static Region mapToDevice(SceneView *view, Item *item, const RegionF &itemLocal)
+ 
+ static bool isCandidate(SurfaceItem *item, const Rect &deviceRect, bool isOpaque, SceneView *view)
+ {
+-    if (!item || !item->buffer() || !item->buffer()->dmabufAttributes()) {
++    if (!item || !item->buffer()) {
++        return false;
++    }
++    // A nested backend presenting through wl_shm hands the host a client's shm buffer as it
++    // is, but only one that covers the screen: overlays would just move the composing to the host.
++    const bool shmScanout = !item->buffer()->dmabufAttributes() && item->buffer()->shmAttributes()
++        && view->layer() && view->layer()->acceptsShmScanout();
++    if (!item->buffer()->dmabufAttributes() && !shmScanout) {
+         return false;
+     }
+     // TODO make the compositor handle item opacity as well
+@@ -272,11 +279,11 @@ static bool isCandidate(SurfaceItem *item, const Rect &deviceRect, bool isOpaque
+     const bool updatesQuickly = item->frameTimeEstimation().transform([](const auto t) {
+         return t < std::chrono::nanoseconds(1'000'000'000) / 20;
+     }).value_or(false);
+-    if (updatesQuickly) {
++    if (updatesQuickly && !shmScanout) {
+         return true;
+     }
+     // fullscreen with low enough bandwidth requirements are always good to scanout
+-    const auto info = FormatInfo::get(item->buffer()->dmabufAttributes()->format);
++    const auto info = FormatInfo::get(shmScanout ? item->buffer()->shmAttributes()->format : item->buffer()->dmabufAttributes()->format);
+     if (!info) {
+         return false;
+     }

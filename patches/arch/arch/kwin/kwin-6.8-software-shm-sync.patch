@@ -1,0 +1,59 @@
+kwin 6.8: finish rendering before a frame goes to the host over wl_shm
+
+On the memfd software device of kwin-6.8-software-shm-presentation.patch there is
+no /dev/udmabuf, and llvmpipe only exports native fences where there is one (its
+fence export does a full finish first). Without them, endFrame's glFlush only
+queues the frame to llvmpipe's rasterizer threads, and the wl_shm buffer is
+committed to the host while they still write into it: pixelflux then reads tiles
+of the new frame mixed with older content, which shows as flickering rectangles
+and UI elements showing through each other.
+
+Finish rendering before committing when frames go to the host as wl_shm buffers,
+which is what the udmabuf path already pays through the fence export, and what
+kwin's own DRM backend does for llvmpipe. Hosts taking dmabufs are unchanged.
+
+Found by lhns/webtop-nix while carrying the presentation patch.
+
+Applies to kwin 6.8.x after kwin-6.8-software-shm-presentation.patch.
+
+--- a/src/backends/wayland/wayland_egl_backend.cpp
++++ b/src/backends/wayland/wayland_egl_backend.cpp
+@@ -50,6 +50,18 @@ static FormatModifierMap presentableFormats(WaylandBackend *backend)
+     return backend->display()->linuxDmabuf()->formats();
+ }
+ 
++// A wl_shm buffer carries no fence: the host reads it as soon as it is committed. The software
++// renderer only exports native fences where /dev/udmabuf exists, and without them glFlush just
++// queues the frame to its rasterizer threads, which then still write the buffer the host reads.
++static void finishRendering(WaylandBackend *backend)
++{
++    if (backend->presentsThroughShm()) {
++        glFinish();
++    } else {
++        glFlush();
++    }
++}
++
+ WaylandEglLayer::WaylandEglLayer(WaylandOutput *output, WaylandEglBackend *backend, OutputLayerType type, int zpos)
+     : WaylandLayer(output, type, zpos)
+     , m_backend(backend)
+@@ -133,8 +145,7 @@ bool WaylandEglLayer::endFrame(const Region &renderedDeviceRegion, const Region
+         m_query->end();
+         frame->addRenderTimeQuery(std::move(m_query));
+     }
+-    // Flush rendering commands to the dmabuf.
+-    glFlush();
++    finishRendering(m_backend->backend());
+     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
+ 
+     // The damage is where the picture changed, and the picture is composed the way the user
+@@ -238,8 +249,7 @@ bool WaylandEglCursorLayer::endFrame(const Region &renderedDeviceRegion, const R
+         m_query->end();
+         frame->addRenderTimeQuery(std::move(m_query));
+     }
+-    // Flush rendering commands to the dmabuf.
+-    glFlush();
++    finishRendering(m_backend->backend());
+ 
+     wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
+     Q_ASSERT(buffer);
